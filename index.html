@@ -1,0 +1,996 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JGit Ref-Update Benchmark — RefUpdate vs BatchRefUpdate(N=1)</title>
+<meta name="description" content="Empirical JMH comparison of JGit RefUpdate.update() against BatchRefUpdate.execute() with a single ReceiveCommand, on the RefDirectory backend, across CREATE and packed/loose UPDATE scenarios on repositories with 1K to 2M preexisting refs.">
+<meta name="author" content="David Ostrovsky">
+<meta property="og:title" content="JGit Ref-Update Benchmark — RefUpdate vs BatchRefUpdate(N=1)">
+<meta property="og:description" content="JMH benchmark of RefUpdate vs BatchRefUpdate(N=1) on JGit's RefDirectory backend at 1K-2M ref scales. BatchRefUpdate(N=1) is as fast as or faster than RefUpdate at every reliably-measured scale.">
+<meta property="og:type" content="article">
+<meta property="article:author" content="David Ostrovsky">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --bg-elevated: #131a2e;
+    --bg-card: #1a2240;
+    --bg-card-hover: #1f2849;
+    --border: #2a3357;
+    --border-soft: #1f2849;
+    --text: #e8ecf4;
+    --text-muted: #9aa4be;
+    --text-dim: #6b7494;
+    --accent: #22d3ee;
+    --accent-soft: rgba(34, 211, 238, 0.1);
+    --accent-glow: rgba(34, 211, 238, 0.3);
+    --gold: #fbbf24;
+    --silver: #cbd5e1;
+    --bronze: #d97706;
+    --red: #ef4444;
+    --green: #10b981;
+    --purple: #a78bfa;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg);
+    background-image:
+      radial-gradient(at 20% 0%, rgba(34, 211, 238, 0.05) 0px, transparent 50%),
+      radial-gradient(at 80% 0%, rgba(167, 139, 250, 0.04) 0px, transparent 50%);
+    background-attachment: fixed;
+    color: var(--text);
+    line-height: 1.65;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ============ HERO ============ */
+  .hero {
+    text-align: center;
+    padding: 80px 24px 60px;
+    border-bottom: 1px solid var(--border-soft);
+    position: relative;
+  }
+
+  .hero::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 120px;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  }
+
+  .hero-eyebrow {
+    display: inline-block;
+    font-size: 0.8rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    font-weight: 700;
+    margin-bottom: 24px;
+    padding: 6px 14px;
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-glow);
+    border-radius: 20px;
+  }
+
+  .hero h1 {
+    font-size: clamp(2rem, 5vw, 3.25rem);
+    font-weight: 800;
+    line-height: 1.15;
+    margin: 0 auto 24px;
+    max-width: 900px;
+    letter-spacing: -0.02em;
+    background: linear-gradient(135deg, #e8ecf4 0%, #22d3ee 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .hero h1 code {
+    -webkit-text-fill-color: initial;
+    color: #c0e6f5;
+  }
+
+  .hero p.tagline {
+    font-size: 1.15rem;
+    color: var(--text-muted);
+    max-width: 700px;
+    margin: 0 auto;
+  }
+
+  .hero-byline {
+    display: inline-block;
+    margin-top: 28px;
+    padding: 10px 18px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 0.92rem;
+    color: var(--text-muted);
+  }
+
+  .hero-byline strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .hero-byline .role {
+    color: var(--accent);
+    font-weight: 500;
+    margin-left: 4px;
+  }
+
+  /* ============ SECTIONS ============ */
+  section {
+    padding: 70px 0;
+  }
+
+  section + section {
+    border-top: 1px solid var(--border-soft);
+  }
+
+  .section-header {
+    margin-bottom: 40px;
+  }
+
+  .section-header h2 {
+    font-size: 1.875rem;
+    font-weight: 700;
+    margin: 0 0 12px;
+    letter-spacing: -0.01em;
+  }
+
+  .section-header .subtitle {
+    color: var(--text-muted);
+    font-size: 1rem;
+    margin: 0;
+    max-width: 700px;
+  }
+
+  /* ============ CONTEXT ============ */
+  .context {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px 32px;
+    font-size: 0.97rem;
+    color: var(--text-muted);
+  }
+
+  .context p {
+    margin: 0 0 12px;
+  }
+
+  .context p:last-child {
+    margin-bottom: 0;
+  }
+
+  .context strong {
+    color: var(--text);
+  }
+
+  .context-list {
+    margin: 10px 0 16px;
+    padding-left: 4px;
+    list-style: none;
+  }
+
+  .context-list li {
+    padding: 6px 0 6px 28px;
+    position: relative;
+    color: var(--text-muted);
+  }
+
+  .context-list li::before {
+    content: '';
+    position: absolute;
+    left: 8px;
+    top: 16px;
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+
+  .context-list li strong {
+    color: var(--text);
+  }
+
+  .callout {
+    background: rgba(34, 211, 238, 0.08);
+    border-left: 3px solid var(--accent);
+    padding: 14px 18px;
+    margin: 18px 0;
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 0.97rem;
+  }
+
+  .callout strong {
+    color: var(--accent);
+  }
+
+  /* ============ TABLE OPTION LINKS ============ */
+  .opt-link {
+    display: inline-block;
+    margin-top: 6px;
+    font-size: 0.8rem;
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 500;
+    transition: opacity 0.2s ease;
+  }
+
+  .opt-link::after {
+    content: " ↗";
+    display: inline-block;
+    margin-left: 2px;
+    font-size: 0.85em;
+  }
+
+  .opt-link:hover {
+    opacity: 0.75;
+    text-decoration: underline;
+  }
+
+  /* ============ COMPANION PROPOSAL NOTE ============ */
+  .companion-note {
+    background: rgba(167, 139, 250, 0.08);
+    border-left: 3px solid var(--purple);
+    padding: 18px 22px;
+    margin-top: 24px;
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    line-height: 1.65;
+  }
+
+  .companion-note strong {
+    color: var(--purple);
+  }
+
+  .companion-note a {
+    color: var(--purple);
+    text-decoration: none;
+    font-weight: 600;
+  }
+
+  .companion-note a:hover {
+    text-decoration: underline;
+  }
+
+  .companion-note a::after {
+    content: " ↗";
+    font-size: 0.85em;
+  }
+
+  /* ============ TABLE ============ */
+  .table-wrap {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    overflow-x: auto;
+  }
+
+  .options-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 600px;
+  }
+
+  .options-table th {
+    background: var(--bg-elevated);
+    padding: 14px 16px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  .options-table td {
+    padding: 18px 16px;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 0.95rem;
+    vertical-align: top;
+  }
+
+  .options-table tr:last-child td {
+    border-bottom: none;
+  }
+
+  .options-table tbody tr {
+    transition: background 0.2s ease;
+  }
+
+  .options-table tbody tr:hover {
+    background: var(--accent-soft);
+  }
+
+  .opt-num {
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: var(--accent);
+  }
+
+  .opt-title {
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  /* ============ PERSPECTIVES ============ */
+  .perspectives {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px;
+  }
+
+  .perspective {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px;
+    transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .perspective:hover {
+    transform: translateY(-2px);
+    border-color: var(--accent-glow);
+    box-shadow: 0 12px 32px -16px rgba(34, 211, 238, 0.2);
+  }
+
+  .perspective-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    margin: 0 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .perspective-title .emoji {
+    font-size: 1.5rem;
+  }
+
+  .perspective-body {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    margin: 0;
+  }
+
+  .perspective-body strong {
+    color: var(--text);
+  }
+
+  /* ============ RANK CARDS ============ */
+  .rank-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px;
+    margin-bottom: 24px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.2s ease;
+  }
+
+  .rank-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 5px;
+    height: 100%;
+  }
+
+  .rank-card.gold::before { background: linear-gradient(180deg, var(--gold), #f59e0b); }
+  .rank-card.silver::before { background: linear-gradient(180deg, var(--silver), #94a3b8); }
+  .rank-card.bronze::before { background: linear-gradient(180deg, var(--bronze), #92400e); }
+  .rank-card.no-go::before { background: linear-gradient(180deg, var(--red), #b91c1c); }
+
+  .rank-card.gold:hover { border-color: var(--gold); }
+  .rank-card.silver:hover { border-color: var(--silver); }
+  .rank-card.bronze:hover { border-color: var(--bronze); }
+  .rank-card.no-go:hover { border-color: var(--red); }
+
+  .rank-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 18px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+
+  .rank-medal {
+    font-size: 2.5rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  .rank-info {
+    flex: 1;
+    min-width: 200px;
+  }
+
+  .rank-info h3 {
+    margin: 0 0 6px;
+    font-size: 1.4rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+
+  .rank-info .rank-label {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+
+  .rank-badge {
+    display: inline-block;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-left: auto;
+    align-self: center;
+  }
+
+  .rank-badge.recommended {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--green);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+  }
+
+  .rank-badge.acceptable {
+    background: rgba(203, 213, 225, 0.1);
+    color: var(--silver);
+    border: 1px solid rgba(203, 213, 225, 0.3);
+  }
+
+  .rank-badge.suboptimal {
+    background: rgba(217, 119, 6, 0.15);
+    color: var(--bronze);
+    border: 1px solid rgba(217, 119, 6, 0.4);
+  }
+
+  .rank-badge.reject {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--red);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+  }
+
+  .rank-section {
+    margin-top: 22px;
+  }
+
+  .rank-section:first-of-type {
+    margin-top: 0;
+  }
+
+  .rank-section-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin: 0 0 12px;
+    font-weight: 700;
+  }
+
+  .rank-card.gold .rank-section-title.accent { color: var(--gold); }
+  .rank-card.silver .rank-section-title.accent { color: var(--silver); }
+  .rank-card.bronze .rank-section-title.accent { color: var(--bronze); }
+  .rank-card.no-go .rank-section-title.accent { color: var(--red); }
+
+  .rank-section p {
+    margin: 0 0 14px;
+    color: var(--text-muted);
+    font-size: 0.97rem;
+  }
+
+  .rank-section p strong {
+    color: var(--text);
+  }
+
+  .rank-list {
+    margin: 8px 0;
+    padding-left: 0;
+    list-style: none;
+  }
+
+  .rank-list li {
+    padding: 8px 0 8px 30px;
+    position: relative;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    line-height: 1.55;
+  }
+
+  .rank-list li.pro::before {
+    content: "✓";
+    position: absolute;
+    left: 4px;
+    top: 8px;
+    color: var(--green);
+    font-weight: 800;
+    font-size: 1.1rem;
+  }
+
+  .rank-list li.con::before {
+    content: "✕";
+    position: absolute;
+    left: 4px;
+    top: 8px;
+    color: var(--red);
+    font-weight: 800;
+    font-size: 1.05rem;
+  }
+
+  .rank-list li strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  /* ============ TL;DR ============ */
+  .tldr {
+    background:
+      radial-gradient(ellipse at top left, rgba(34, 211, 238, 0.12), transparent 60%),
+      linear-gradient(135deg, rgba(34, 211, 238, 0.06), rgba(167, 139, 250, 0.04));
+    border: 1px solid rgba(34, 211, 238, 0.3);
+    border-radius: 20px;
+    padding: 44px;
+    margin-top: 24px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .tldr::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(34, 211, 238, 0.5), transparent);
+    height: 1px;
+    top: -1px;
+  }
+
+  .tldr-label {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: 800;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 6px 14px;
+    border-radius: 6px;
+    margin-bottom: 20px;
+  }
+
+  .tldr h2 {
+    font-size: 1.875rem;
+    margin: 0 0 20px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+
+  .tldr p {
+    margin: 0 0 14px;
+    color: var(--text);
+    font-size: 1.05rem;
+    line-height: 1.7;
+  }
+
+  .tldr p:last-child {
+    margin-bottom: 0;
+  }
+
+  .tldr strong {
+    color: var(--accent);
+  }
+
+  /* ============ FOOTER ============ */
+  footer {
+    margin-top: 80px;
+    padding: 40px 24px;
+    border-top: 1px solid var(--border-soft);
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.875rem;
+  }
+
+  footer p {
+    margin: 8px 0;
+  }
+
+  footer a {
+    color: var(--accent);
+    text-decoration: none;
+    transition: opacity 0.2s ease;
+  }
+
+  footer a:hover {
+    opacity: 0.8;
+  }
+
+  footer strong {
+    color: var(--text);
+  }
+
+  /* ============ CODE ============ */
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, "Liberation Mono", monospace;
+    background: var(--bg-elevated);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.86em;
+    color: #c0e6f5;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  /* ============ RESPONSIVE ============ */
+  @media (max-width: 768px) {
+    .hero {
+      padding: 60px 16px 50px;
+    }
+    section {
+      padding: 50px 0;
+    }
+    .container {
+      padding: 0 16px;
+    }
+    .options-table th,
+    .options-table td {
+      padding: 12px 10px;
+      font-size: 0.85rem;
+    }
+    .rank-card {
+      padding: 24px;
+    }
+    .tldr {
+      padding: 32px 24px;
+    }
+    .tldr h2 {
+      font-size: 1.5rem;
+    }
+    .rank-badge {
+      margin-left: 0;
+      margin-top: 8px;
+    }
+  }
+
+  /* ============ PRINT ============ */
+  @media print {
+    body {
+      background: white;
+      color: black;
+      background-image: none;
+    }
+    .hero h1 {
+      -webkit-text-fill-color: black;
+      background: none;
+    }
+    .rank-card, .perspective, .table-wrap, .tldr, .context {
+      background: white;
+      border-color: #ccc;
+      page-break-inside: avoid;
+    }
+    .options-table th {
+      background: #f5f5f5;
+      color: #333;
+    }
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <span class="hero-eyebrow">A JGit maintainer's benchmark</span>
+    <h1>JGit Ref-Update Benchmark: <code>RefUpdate</code> vs <code>BatchRefUpdate(N=1)</code></h1>
+    <p class="tagline">Empirical JMH measurement of two paths to a single ref update — on JGit's RefDirectory backend, across CREATE and packed/loose UPDATE scenarios up to two million refs.</p>
+    <p class="hero-byline">by <strong>David Ostrovsky</strong><span class="role">— Gerrit &amp; JGit maintainer</span></p>
+  </div>
+</header>
+
+<main>
+
+  <!-- ============ THE QUESTION ============ -->
+  <section>
+    <div class="container">
+      <div class="section-header">
+        <h2>The Question</h2>
+        <p class="subtitle">Why this benchmark exists in the first place.</p>
+      </div>
+      <div class="context">
+        <p>The Gerrit <code>pull-replication</code> plugin had a half-apply bug in its multi-ref <code>batch-apply-object</code> endpoint (<a href="https://issues.gerritcodereview.com/issues/456926963" target="_blank" rel="noopener">Issue 456926963</a>): when ref <em>N</em> failed pre-flight on a missing parent, refs 1..N−1 had already landed. The structural fix was to route the multi-ref endpoint through one <strong>atomic <code>BatchRefUpdate</code></strong>.</p>
+
+        <p>The earlier proposal routed <em>both</em> single-ref and multi-ref endpoints through <code>BatchRefUpdate</code>. A brain-storming session worried this was a <strong>performance regression</strong> for the single-ref code path — and pushed for a bifurcation that keeps single-ref on <code>RefUpdate</code> and only routes multi-ref through <code>BatchRefUpdate</code>. The bifurcation shipped as a 4-commit chain in the GerritForge fork.</p>
+
+        <div class="callout">
+          <strong>The unasked question:</strong> is <code>BatchRefUpdate.execute()</code> with a single <code>ReceiveCommand</code> actually slower than <code>RefUpdate.update()</code> on real-sized repositories? Nobody had measured it.
+        </div>
+
+        <p>This benchmark answers that question with JMH on the upstream JGit, on the <code>RefDirectory</code> backend, across four ref-count scales (1K, 10K, 1M, 2M) and three scenarios (CREATE, packed-start UPDATE, loose-start UPDATE).</p>
+
+        <p><strong>BatchRefUpdate(N=1) is as fast as — or faster than — RefUpdate at every reliably-measured point.</strong> Every UPDATE favours BRU (0.54–0.71), and CREATE is parity-to-BRU-favoured at 1M/2M (0.87 / 0.93). The 1K/10K CREATE rows are noise (error bars as large as the values). An earlier throwaway run hinted at a CREATE "inversion" (BRU ~1.67× slower at 1M); it did <em>not</em> reproduce once the benchmark's ref-selection bug was fixed and the run was given real forks and iterations.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ METHODOLOGY ============ -->
+  <section>
+    <div class="container">
+      <div class="section-header">
+        <h2>Methodology</h2>
+        <p class="subtitle">JMH on upstream JGit. Complements Luca Milanesio's <code>GetRefsBenchmark</code> (read path) with the write-path counterpart.</p>
+      </div>
+
+      <div class="context">
+        <p><strong>Harness:</strong> JMH 1.37, <code>@BenchmarkMode(Mode.AverageTime)</code>, <code>@OutputTimeUnit(MICROSECONDS)</code>. 2 forks × (2×100&nbsp;ms warmup + 3×5&nbsp;s measurement); ± is the 99.9 % CI.</p>
+        <p><strong>JDK:</strong> 21.0.7 (Zulu) — JDK 25 trips the JGit Maven build's gmavenplus-plugin.</p>
+        <p><strong>Source:</strong> a new <code>RefUpdateBenchmark.java</code> in <code>org.eclipse.jgit.benchmarks</code> proposed for upstream JGit. Mirrors the existing <code>GetRefsBenchmark</code> pattern (<code>@State</code>, <code>@Setup</code>, <code>@Param</code>) faithfully.</p>
+      </div>
+
+      <div class="section-header" style="margin-top:36px;">
+        <h2 style="font-size:1.4rem;">Parameter space</h2>
+      </div>
+      <div class="table-wrap">
+        <table class="options-table">
+          <thead>
+            <tr>
+              <th>Parameter</th>
+              <th>Values</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="opt-title"><code>numBranches</code></td>
+              <td>1,000 · 10,000 · 1,000,000 · 2,000,000</td>
+              <td>Preexisting refs in the repo before the benchmark starts. Populated via direct <code>packed-refs</code> write in <code>@Setup</code> (~50× faster than <code>BatchRefUpdate</code> at 2M). CREATE sweeps all four; packed-start UPDATE runs 1M/2M; loose-start UPDATE runs 10K.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section-header" style="margin-top:36px;">
+        <h2 style="font-size:1.4rem;">Six <code>@Benchmark</code> methods (three scenarios × two paths)</h2>
+      </div>
+      <div class="table-wrap">
+        <table class="options-table">
+          <thead>
+            <tr>
+              <th>Class · method</th>
+              <th>Scenario</th>
+              <th>Path</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="opt-title"><code>RefCreateBenchmark.createViaRefUpdate</code></td>
+              <td>CREATE a brand-new ref</td>
+              <td><code>RefUpdate.update()</code></td>
+            </tr>
+            <tr>
+              <td class="opt-title"><code>RefCreateBenchmark.createViaBatchRefUpdate</code></td>
+              <td>CREATE a brand-new ref</td>
+              <td><code>BatchRefUpdate.execute()</code>, N=1</td>
+            </tr>
+            <tr>
+              <td class="opt-title"><code>PackedRefUpdateBenchmark.updatePackedViaRefUpdate</code></td>
+              <td>UPDATE a <strong>packed-start</strong> ref (in <code>packed-refs</code>)</td>
+              <td><code>RefUpdate.update()</code></td>
+            </tr>
+            <tr>
+              <td class="opt-title"><code>PackedRefUpdateBenchmark.updatePackedViaBatchRefUpdate</code></td>
+              <td>UPDATE a <strong>packed-start</strong> ref (in <code>packed-refs</code>)</td>
+              <td><code>BatchRefUpdate.execute()</code>, N=1</td>
+            </tr>
+            <tr>
+              <td class="opt-title"><code>LooseRefUpdateBenchmark.updateLooseViaRefUpdate</code></td>
+              <td>UPDATE a <strong>loose-start</strong> ref (own loose file)</td>
+              <td><code>RefUpdate.update()</code></td>
+            </tr>
+            <tr>
+              <td class="opt-title"><code>LooseRefUpdateBenchmark.updateLooseViaBatchRefUpdate</code></td>
+              <td>UPDATE a <strong>loose-start</strong> ref (own loose file)</td>
+              <td><code>BatchRefUpdate.execute()</code>, N=1</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ RESULTS ============ -->
+  <section>
+    <div class="container">
+      <div class="section-header">
+        <h2>Results</h2>
+        <p class="subtitle">Full matrix on RefDirectory: CREATE (1K–2M), packed-start UPDATE (1M/2M), loose-start UPDATE (10K). JMH 1.37, JDK 21, 2 forks × 3×5 s iterations; ± is the 99.9 % CI.</p>
+      </div>
+
+      <div class="table-wrap" style="margin-top:24px;">
+        <table class="options-table">
+          <thead>
+            <tr>
+              <th>Scenario</th>
+              <th>Refs</th>
+              <th>RU<br/>(µs/op)</th>
+              <th>BRU N=1<br/>(µs/op)</th>
+              <th>BRU/RU</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>CREATE</td><td>1,000</td><td>1,804 ±843</td><td>2,272 ±1,294</td><td>1.26 — <em>noise</em></td></tr>
+            <tr><td>CREATE</td><td>10,000</td><td>1,701 ±694</td><td>1,716 ±1,170</td><td>1.01 — <em>noise</em></td></tr>
+            <tr><td>CREATE</td><td><strong>1,000,000</strong></td><td><strong>1,672 ±276</strong></td><td><strong>1,459 ±328</strong></td><td><strong>0.87</strong></td></tr>
+            <tr><td>CREATE</td><td><strong>2,000,000</strong></td><td><strong>1,656 ±316</strong></td><td><strong>1,543 ±256</strong></td><td><strong>0.93</strong></td></tr>
+            <tr><td>UPDATE · packed-start</td><td><strong>1,000,000</strong></td><td><strong>1,754 ±514</strong></td><td><strong>1,107 ±303</strong></td><td><strong>0.63</strong></td></tr>
+            <tr><td>UPDATE · packed-start</td><td><strong>2,000,000</strong></td><td><strong>1,966 ±928</strong></td><td><strong>1,059 ±269</strong></td><td><strong>0.54</strong></td></tr>
+            <tr><td>UPDATE · loose-start</td><td>10,000</td><td>1,875 ±315</td><td>1,328 ±356</td><td><strong>0.71</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout" style="margin-top:24px;">
+        <strong>BRU(N=1) is as fast as — or faster than — RU at every reliably-measured point.</strong> Every UPDATE favours BRU (0.54–0.71), with the packed-start advantage <em>growing</em> with scale. CREATE is parity-to-BRU-favoured at 1M/2M (0.87 / 0.93). The 1K/10K CREATE rows carry error bars as large as the values themselves (±~1,200 µs), so they can't be ranked — and the earlier "createBRU 67 % slower at 1M" inversion <strong>did not reproduce</strong> once the ref-selection bug was fixed and the run was given real forks and iterations.
+      </div>
+
+      <div class="callout" style="margin-top:16px;">
+        <strong>Why loose-start stops at 10K:</strong> each invocation consumes one unique ref, and a 5 s JMH iteration runs ~2,700 ops — more than a 1K pool holds — so a 1K pool exhausts mid-iteration. <code>LooseRefUpdateBenchmark</code> rebuilds the repo fresh each iteration (<code>@Setup(Level.Iteration)</code>), which makes 10K stable at any iteration count; 1K can't survive even one 5 s iteration and is left out.
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ NATIVE-GIT REFERENCE ============ -->
+  <section>
+    <div class="container">
+      <div class="section-header">
+        <h2>Native git reference</h2>
+        <p class="subtitle">Canonical git (C) and libgit2 numbers as comparison baselines for JGit.</p>
+      </div>
+
+      <div class="context">
+        <p>Native git has no in-process API, so a perfectly fair head-to-head with JGit's in-process measurement is impossible. Three useful baselines, each measuring a slightly different thing:</p>
+
+        <ul class="context-list">
+          <li><strong>Per-call <code>git update-ref</code></strong> — one fork per ref. Dominated by <code>fork()</code> + <code>execve()</code> cost (~10-50 ms on macOS). Useful only as a "what does shelling out cost?" data point.</li>
+          <li><strong>Bulk <code>git update-ref --stdin</code></strong> — one fork, N commands batched. Closest fair comparison to JGit's <code>BatchRefUpdate</code> with N=large; divide total time by N for amortised per-op cost.</li>
+          <li><strong>libgit2 via pygit2</strong> — in-process via Python FFI. A different C implementation of git's on-disk format, not canonical git, but reading/writing the same files. Per-op cost is in the same ballpark.</li>
+        </ul>
+
+        <p>Numbers below are on a Darwin x86_64 laptop, git 2.54.0, pygit2 1.19.3 / libgit2 1.9.4, against a 100,000-ref bench repo populated via <code>git update-ref --stdin</code> + <code>git pack-refs --all</code>.</p>
+      </div>
+
+      <div class="table-wrap" style="margin-top:24px;">
+        <table class="options-table">
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th>Scenario</th>
+              <th>µs/op</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td class="opt-title">canonical git</td><td>per-call CREATE (100 iters)</td><td><strong>20,942</strong></td><td>fork+exec dominates</td></tr>
+            <tr><td class="opt-title">canonical git</td><td>per-call UPDATE (100 iters)</td><td><strong>22,955</strong></td><td>fork+exec dominates</td></tr>
+            <tr><td class="opt-title">canonical git</td><td>bulk CREATE (--stdin, 10K ops)</td><td><strong>1,192</strong></td><td>amortised; one fork</td></tr>
+            <tr><td class="opt-title">canonical git</td><td>bulk UPDATE (--stdin, 10K ops)</td><td><strong>861</strong></td><td>amortised; one fork</td></tr>
+            <tr><td class="opt-title">pygit2 (libgit2)</td><td>CREATE new (1000 iters)</td><td><strong>6,264</strong></td><td>in-process via Python FFI</td></tr>
+            <tr><td class="opt-title">pygit2 (libgit2)</td><td>UPDATE existing (1000 iters)</td><td><strong>6,685</strong></td><td>in-process via Python FFI</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section-header" style="margin-top:36px;">
+        <h2 style="font-size:1.4rem;">Cross-implementation ranking at 1M refs (fair scale match)</h2>
+        <p class="subtitle">All numbers measured against a 1,000,000-ref bare repo on the same hardware.</p>
+      </div>
+      <div class="table-wrap">
+        <table class="options-table">
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Path</th>
+              <th>µs/op</th>
+              <th>vs fastest</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>🥇</td><td class="opt-title">canonical git bulk UPDATE (<code>--stdin</code>, 10K ops/fork)</td><td><strong>557</strong></td><td>1.0×</td></tr>
+            <tr><td>🥈</td><td class="opt-title">JGit <code>BatchRefUpdate</code> N=1 UPDATE-packed (RefDirectory)</td><td><strong>1,107</strong></td><td>2.0×</td></tr>
+            <tr><td>🥉</td><td class="opt-title">canonical git bulk CREATE (<code>--stdin</code>, 10K ops/fork)</td><td>1,130</td><td>2.0×</td></tr>
+            <tr><td>—</td><td class="opt-title">JGit <code>BatchRefUpdate</code> N=1 CREATE (RefDirectory)</td><td>1,459</td><td>2.6×</td></tr>
+            <tr><td>—</td><td class="opt-title">JGit <code>RefUpdate.update()</code> CREATE (RefDirectory)</td><td>1,672</td><td>3.0×</td></tr>
+            <tr><td>—</td><td class="opt-title">JGit <code>RefUpdate.update()</code> UPDATE-packed (RefDirectory)</td><td>1,754</td><td>3.1×</td></tr>
+            <tr><td>—</td><td class="opt-title">pygit2 (libgit2) CREATE</td><td>69,402</td><td>124×</td></tr>
+            <tr><td>—</td><td class="opt-title">pygit2 (libgit2) UPDATE</td><td>71,971</td><td>129×</td></tr>
+            <tr><td>🐢</td><td class="opt-title">canonical git per-call <code>git update-ref</code> (fork-dominated)</td><td>~25,000</td><td>45×</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout" style="margin-top:24px;">
+        <strong>Reading this:</strong> JGit's best path (<code>updateBRU</code> packed on RefDirectory, 1,107 µs) is <strong>2.0× slower</strong> than native git's bulk UPDATE; its <code>createBRU</code> (1,459 µs) is <strong>1.3× slower</strong> than native bulk CREATE. ~1.5-2× is the typical JVM-vs-C tax for IO-heavy work. <strong>pygit2/libgit2 via Python FFI scales catastrophically</strong> (~125× slower than native git bulk at 1M); not a fair in-process baseline at scale. Canonical git per-call is dominated by <code>fork() + execve()</code> — confirms "don't shell out per ref."
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ROOT CAUSE ============ -->
+  <section>
+    <div class="container">
+      <div class="section-header">
+        <h2>What the source shows</h2>
+        <p class="subtitle">Why the two N=1 paths are directly comparable — and what's left to profile.</p>
+      </div>
+
+      <div class="context">
+        <p><code>PackedBatchRefUpdate.execute</code> short-circuits at <code>pending.size() == 1</code> — explicit in the JGit source:</p>
+
+        <div class="callout">
+          <code>// Single-ref updates are always atomic, no need for packed-refs.</code><br/>
+          <code>super.execute(walk, monitor, options);</code>
+        </div>
+
+        <p>So a 1-command <code>BatchRefUpdate</code> on RefDirectory skips the packed-refs locking/rewriting machinery and falls through to the base <code>BatchRefUpdate.execute</code>, which loops once and creates a single <code>RefUpdate</code> via <code>BRU.newUpdate(cmd)</code>. Both paths therefore bottom out in the same <code>RefDirectoryUpdate.doUpdate</code> for the write itself — which is what makes the N=1 comparison meaningful: any difference is wrapper, not the underlying write.</p>
+
+        <p><strong>What we measured:</strong> that wrapper difference favours <code>BatchRefUpdate(N=1)</code> at every reliably-measured point, and the gap is larger for UPDATE (0.54–0.71×) than for CREATE (0.87–0.93× at 1M/2M). <strong>Why</strong> the wrapper costs differ — and why UPDATE differs more than CREATE — is not something this benchmark establishes. Pinning it down (a candidate to check: the constructed <code>RefUpdate</code>'s reflog settings vs a direct <code>RefUpdate</code>'s <code>refLogMessage = ""</code> default) is left to a profiling/debug session.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TL;DR ============ -->
+  <section>
+    <div class="container">
+      <div class="tldr">
+        <span class="tldr-label">TL;DR</span>
+        <h2>BatchRefUpdate(N=1) is not slower. The bifurcation's performance fear isn't supported.</h2>
+        <p>On <code>RefDirectory</code>, <code>BatchRefUpdate(N=1)</code> is as fast as — or faster than — <code>RefUpdate.update()</code> at every reliably-measured scale:</p>
+        <p><strong>UPDATE</strong> (packed-start 0.63× at 1M, 0.54× at 2M; loose-start 0.71× at 10K): BRU clearly faster. Why the gap is larger for UPDATE than CREATE is not established here — left to a profiling session.</p>
+        <p><strong>CREATE</strong> (0.87× at 1M, 0.93× at 2M): parity-to-BRU-favoured. At 1K/10K the error bars are as large as the values, so those aren't rankable — and the earlier "CREATE inverts to 1.67× slower at 1M" did <em>not</em> reproduce once the benchmark's ref-selection bug was fixed.</p>
+        <p><strong>Implication for the pull-replication bifurcation</strong> that motivated this benchmark: it kept single-ref updates off <code>BatchRefUpdate</code> for fear of a per-N=1 slowdown. Measurement doesn't support that fear. The architectural-cleanliness case may stand on its own; the performance case does not.</p>
+        <p><strong>The wider lesson:</strong> a single-fork JMH run over a flawed setup can manufacture a clean-looking trend. Forks, iterations, and a correct harness matter.</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="container">
+    <p>By <strong>David Ostrovsky</strong> — Gerrit &amp; JGit maintainer.</p>
+    <p>Source: <a href="https://github.com/davido/jgit-ref-update-benchmark">github.com/davido/jgit-ref-update-benchmark</a>. Benchmark proposed for upstream <a href="https://github.com/eclipse-jgit/jgit/tree/master/org.eclipse.jgit.benchmarks">JGit / org.eclipse.jgit.benchmarks</a>.</p>
+  </div>
+</footer>
+
+</body>
+</html>
